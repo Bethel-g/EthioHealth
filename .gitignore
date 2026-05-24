@@ -1,0 +1,22 @@
+# Virtual environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+
+# Models
+models/*.pkl
+
+# Data files
+data/*.csv
+
+# OS files
+.DS_Store
