@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # EthioHealth-AI: Localized Clinical Decision Support System
 
 **Reducing ED overcrowding in Ethiopian referral hospitals using ML-based Length of Stay prediction**
@@ -897,3 +898,7 @@ XGBRegressor(
 ---
 
 **Questions?** See [Project Report](#) or contact your instructor.
+=======
+# EthioHealth
+ EthioHealth-AI: A Localized, Multimodal Clinical Decision Support System to Mitigate Emergency Department Overcrowding in Ethiopian Referral Hospitals
+>>>>>>> a468d3e9172777c52449388078b77a582aab92c7
