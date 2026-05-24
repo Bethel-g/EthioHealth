@@ -369,6 +369,12 @@ import joblib
 from pathlib import Path
 import warnings
 import sys
+import logging
+from datetime import datetime
+
+# Logging setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Add src to path for preprocessing module
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
