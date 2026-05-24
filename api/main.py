@@ -368,6 +368,10 @@ import pandas as pd
 import joblib
 from pathlib import Path
 import warnings
+import sys
+
+# Add src to path for preprocessing module
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 warnings.filterwarnings("ignore")
 
@@ -578,11 +582,37 @@ def preprocess_input(patient: PatientInput):
 
     try:
 
-        engineered = calculate_engineered_features(patient)
+        # Get current date/time to derive day of week and month
+        now = pd.Timestamp.now()
+        arrival_day_of_week = now.weekday()  # 0=Monday, 6=Sunday
+        arrival_month = now.month
 
+        # Determine medication_intensive based on triage and complaint
+        medication_intensive = 1 if patient.triage_category <= 2 else 0
+
+        # Determine disposition (based on prediction logic)
+        if patient.triage_category == 1:
+            disposition = "ICU"
+        elif patient.triage_category <= 2:
+            disposition = "Admission"
+        else:
+            disposition = "Discharge"
+
+        # Estimate staff hours and wait time based on triage
+        # These are synthetic estimates - in reality would come from ED records
+        staff_hours_estimate = 8 if patient.triage_category <= 2 else 4
+        wait_time_before_physician_hours = 1.5 if patient.triage_category <= 2 else 0.5
+
+        # Build data in the exact order the preprocessor expects
         data = {
             "age": [patient.age],
             "gender": [patient.gender],
+            "region": [patient.region],
+            "transport_mode": [patient.transport_mode],
+            "arrival_hour": [patient.arrival_hour],
+            "arrival_day_of_week": [arrival_day_of_week],
+            "arrival_month": [arrival_month],
+            "is_peak_hour": [int((8 <= patient.arrival_hour <= 11) or (18 <= patient.arrival_hour <= 22))],
             "chief_complaint": [patient.chief_complaint],
             "systolic_bp": [patient.systolic_bp],
             "diastolic_bp": [patient.diastolic_bp],
@@ -591,19 +621,13 @@ def preprocess_input(patient: PatientInput):
             "spo2": [patient.spo2],
             "temperature_c": [patient.temperature_c],
             "triage_category": [patient.triage_category],
-            "region": [patient.region],
-            "transport_mode": [patient.transport_mode],
+            "disposition": [disposition],
             "imaging_ordered": [patient.imaging_ordered],
             "lab_ordered": [patient.lab_ordered],
-            "arrival_hour": [patient.arrival_hour],
-
-            # Engineered Features
-            "is_peak_hour": [engineered["is_peak_hour"]],
-            "is_night_shift": [engineered["is_night_shift"]],
-            "is_weekend": [engineered["is_weekend"]],
-            "complaint_risk_score": [engineered["complaint_risk_score"]],
-            "transport_risk": [engineered["transport_risk"]],
-            "resource_intensity": [engineered["resource_intensity"]]
+            "medication_intensive": [medication_intensive],
+            "staff_hours_estimate": [staff_hours_estimate],
+            "wait_time_before_physician_hours": [wait_time_before_physician_hours],
+            "los_hours": [12.0],  # Dummy target for preprocessing
         }
 
         df = pd.DataFrame(data)
@@ -823,6 +847,158 @@ async def predict_los(patient: PatientInput):
 
 
 # =========================================================
+# COMPREHENSIVE CDSS (Clinical Decision Support System)
+# =========================================================
+class PatientCDSSInput(BaseModel):
+    """Full patient data for comprehensive CDSS diagnosis."""
+    # Demographics
+    age: float
+    gender: str
+    weight_kg: Optional[float] = None
+    height_cm: Optional[float] = None
+    pregnancy_status: Optional[str] = None
+    
+    # Symptoms
+    symptoms: List[str]
+    duration_days: Optional[float] = None
+    severity: Optional[str] = None  # mild, moderate, severe
+    
+    # Vitals
+    temperature_c: Optional[float] = None
+    systolic_bp: Optional[float] = None
+    diastolic_bp: Optional[float] = None
+    heart_rate: Optional[float] = None
+    respiratory_rate: Optional[float] = None
+    spo2: Optional[float] = None
+    
+    # Medical history
+    chronic_diseases: Optional[List[str]] = None
+    medications: Optional[List[str]] = None
+    allergies: Optional[List[str]] = None
+    
+    # Lab results (as strings to avoid hallucination)
+    lab_results: Optional[dict] = None
+    
+    # Imaging findings
+    imaging_findings: Optional[List[str]] = None
+
+
+@app.post("/cdss")
+async def comprehensive_cdss(patient: PatientCDSSInput):
+    """
+    Comprehensive Clinical Decision Support System.
+    Returns structured diagnosis, risk assessment, and treatment recommendations.
+    """
+    
+    # Disease knowledge base with evidence-based rules
+    disease_rules = {
+        "Malaria": {
+            "symptoms": ["fever", "chill", "rigor", "sweating", "headache", "body ache"],
+            "red_flags": ["fever", "altered mental status", "severe anemia"],
+            "severity_multiplier": 0.8 if (patient.temperature_c and patient.temperature_c > 39) else 0.6,
+            "tests": ["Malaria RDT", "Blood smear microscopy", "CBC"],
+            "first_line_treatment": [
+                {"drug": "Artemether or Artesunate", "route": "IV", "indication": "Severe malaria"}
+            ],
+            "second_line": [
+                {"drug": "Quinine", "route": "IV", "indication": "If artemisinin unavailable"}
+            ],
+            "support": ["IV fluids", "Blood transfusion if Hgb<7", "Manage cerebral malaria risk"]
+        },
+        "Typhoid": {
+            "symptoms": ["fever", "abdominal pain", "constipation", "diarrhea", "headache", "weakness"],
+            "red_flags": ["delirium", "perforation signs", "shock"],
+            "severity_multiplier": 0.7 if (patient.temperature_c and patient.temperature_c > 39.5) else 0.5,
+            "tests": ["Blood culture", "Widal test/RDT", "CBC", "LFTs"],
+            "first_line_treatment": [
+                {"drug": "Ceftriaxone", "dose": "2g", "route": "IV", "freq": "8h"}
+            ],
+            "second_line": [
+                {"drug": "Fluoroquinolone (Ciprofloxacin)", "dose": "500mg", "route": "PO", "freq": "12h"}
+            ]
+        },
+        "Respiratory infection": {
+            "symptoms": ["cough", "shortness of breath", "sputum", "wheeze", "dyspnea", "chest pain"],
+            "red_flags": ["stridor", "hypoxia <90%", "altered mental status"],
+            "severity_multiplier": 0.8 if (patient.spo2 and patient.spo2 < 90) else 0.5,
+            "tests": ["Chest X-ray", "CBC", "Blood culture", "Sputum AFB if TB suspected"],
+            "first_line_treatment": [
+                {"drug": "Amoxicillin-Clavulanate or Azithromycin", "indication": "Community-acquired pneumonia"}
+            ]
+        },
+        "Trauma": {
+            "symptoms": ["bleeding", "fracture", "injury", "fall", "head trauma"],
+            "red_flags": ["GCS<8", "uncontrolled bleeding", "pneumothorax", "head trauma"],
+            "severity_multiplier": 0.9,
+            "tests": ["X-ray of affected site", "CT head if GCS<15", "Fast exam", "CBC"],
+            "first_line_treatment": [
+                {"action": "Control bleeding", "method": "Direct pressure, tourniquets"},
+                {"action": "Airway management", "method": "Intubation if needed"}
+            ]
+        }
+    }
+    
+    # Score symptoms against diseases
+    text = " ".join(patient.symptoms).lower()
+    candidates = []
+    
+    for disease, rules in disease_rules.items():
+        keyword_matches = sum(1 for kw in rules["symptoms"] if kw in text)
+        base_score = keyword_matches / len(rules["symptoms"]) if rules["symptoms"] else 0
+        
+        # Adjust by vital signs and severity
+        severity_adj = rules.get("severity_multiplier", 0.5)
+        final_score = base_score * severity_adj
+        
+        if final_score > 0:
+            # Check for red flags
+            red_flag_hits = [rg for rg in rules.get("red_flags", []) if rg in text]
+            
+            candidates.append({
+                "disease": disease,
+                "probability": round(min(final_score * 100, 100), 1),
+                "severity": "HIGH" if red_flag_hits else ("MODERATE" if base_score > 0.5 else "LOW"),
+                "supporting_evidence": [f"Symptom match: {kw}" for kw in rules["symptoms"] if kw in text],
+                "red_flags_detected": red_flag_hits,
+                "recommended_tests": rules.get("tests", []),
+                "first_line": rules.get("first_line_treatment", []),
+                "notes": f"Geographic prevalence: HIGH in Ethiopia" if disease in ["Malaria", "Typhoid"] else ""
+            })
+    
+    # Sort by probability
+    candidates = sorted(candidates, key=lambda x: x["probability"], reverse=True)[:5]
+    
+    # Risk assessment
+    risk_assessment = {
+        "emergency_risk": "HIGH" if (patient.spo2 and patient.spo2 < 90) or (patient.heart_rate and patient.heart_rate > 120) else "MODERATE",
+        "infection_risk": "HIGH" if (patient.temperature_c and patient.temperature_c > 38.5) else "LOW",
+        "sepsis_risk": "HIGH" if (patient.temperature_c and patient.temperature_c > 38.5 and patient.heart_rate and patient.heart_rate > 100) else "LOW",
+        "notes": "Monitor closely for deterioration"
+    }
+    
+    return {
+        "patient_summary": {
+            "age": patient.age,
+            "gender": patient.gender,
+            "symptoms": patient.symptoms,
+            "vital_signs": {
+                "temp_c": patient.temperature_c,
+                "bp": f"{patient.systolic_bp}/{patient.diastolic_bp}" if patient.systolic_bp else None,
+                "hr": patient.heart_rate,
+                "rr": patient.respiratory_rate,
+                "spo2": patient.spo2
+            }
+        },
+        "possible_diagnoses": candidates,
+        "risk_assessment": risk_assessment,
+        "recommended_tests": list(set([t for c in candidates for t in c.get("recommended_tests", [])])),
+        "recommended_referral": "URGENT ER" if risk_assessment["emergency_risk"] == "HIGH" else "Standard care",
+        "confidence_score": round(candidates[0]["probability"] if candidates else 0, 1) if candidates else 0,
+        "disclaimer": "This is a decision support tool. Final diagnosis and treatment decisions must be made by licensed healthcare professionals."
+    }
+
+
+# =========================================================
 # BATCH PREDICTION
 # =========================================================
 @app.post("/batch-predict")
@@ -860,6 +1036,92 @@ async def batch_predict(
         "count": len(results),
         "results": results
     }
+
+
+# =========================================================
+# DIAGNOSE (Rule-based prototype)
+# =========================================================
+class SymptomInput(BaseModel):
+    """Input for simple symptom-based diagnosis prototype."""
+    symptoms: List[str]
+    age: Optional[float] = None
+    gender: Optional[str] = None
+    triage_category: Optional[int] = None
+
+
+@app.post("/diagnose")
+async def diagnose(payload: SymptomInput):
+    """Return top candidate diagnoses and suggested tests/treatment using simple keyword rules.
+    This is a fast prototype for clinician-facing triage support.
+    """
+    text = " ".join(payload.symptoms).lower()
+
+    # Simple clinical rules mapping keywords -> disease
+    rules = {
+        "Malaria": {
+            "keywords": ["fever", "chill", "rigor", "sweat", "headache"],
+            "tests": ["Malaria RDT", "Blood smear"],
+            "treatment": "Artemisinin-based therapy"
+        },
+        "Trauma": {
+            "keywords": ["bleed", "fracture", "injury", "fall", "trauma"],
+            "tests": ["X-ray", "CT if indicated"],
+            "treatment": "Control bleeding, immobilize, analgesia"
+        },
+        "Respiratory infection": {
+            "keywords": ["cough", "shortness of breath", "sputum", "wheeze", "dyspnea"],
+            "tests": ["Chest X-ray", "CBC"],
+            "treatment": "Oxygen, consider antibiotics if bacterial"
+        },
+        "Typhoid": {
+            "keywords": ["fever", "abdominal pain", "constipation", "diarrhea"],
+            "tests": ["Blood culture", "Widal/RDT"],
+            "treatment": "Appropriate antibiotics per local guidelines"
+        },
+        "Diarrheal disease": {
+            "keywords": ["diarrhea", "vomit", "dehydration"],
+            "tests": ["Stool exam", "CBC"],
+            "treatment": "Oral/IV rehydration"
+        },
+        "Hypertensive emergency": {
+            "keywords": ["chest pain", "headache", "blurred vision", "bp", "blood pressure"],
+            "tests": ["Immediate BP measurement", "ECG"],
+            "treatment": "Immediate BP control, urgent consult"
+        }
+    }
+
+    candidates = []
+    for disease, info in rules.items():
+        kws = info["keywords"]
+        match_count = sum(1 for kw in kws if kw in text)
+        score = match_count / len(kws)
+        if score > 0:
+            candidates.append({
+                "disease": disease,
+                "score": round(score, 2),
+                "suggested_tests": info["tests"],
+                "suggested_treatment": info["treatment"]
+            })
+
+    # If no direct matches, do token overlap lookup
+    if not candidates:
+        tokens = set([w.strip('.,') for w in text.split()])
+        for disease, info in rules.items():
+            overlap = tokens.intersection(set(info["keywords"]))
+            if overlap:
+                candidates.append({
+                    "disease": disease,
+                    "score": round(len(overlap) / len(info["keywords"]), 2),
+                    "suggested_tests": info["tests"],
+                    "suggested_treatment": info["treatment"]
+                })
+
+    candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)[:5]
+
+    if not candidates:
+        return {"symptoms": payload.symptoms, "candidates": [], "note": "No likely diagnosis found. Consider full clinical evaluation."}
+
+    return {"symptoms": payload.symptoms, "candidates": candidates}
 
 
 # =========================================================
