@@ -863,7 +863,8 @@ class PatientCDSSInput(BaseModel):
     weight_kg: Optional[float] = None
     height_cm: Optional[float] = None
     pregnancy_status: Optional[str] = None
-    
+
+
     # Symptoms
     symptoms: List[str]
     duration_days: Optional[float] = None
